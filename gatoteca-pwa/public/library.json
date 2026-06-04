@@ -2,14 +2,7 @@
   {
     "id": "gatinho001",
     "title": "Vídeo Gatinho 1",
-    "url": "/videos/gatinho1.mp4",
-    "sizeBytes": 2100000,
-    "priority": 1
-  },
-  {
-    "id": "gatinho002",
-    "title": "Vídeo Gatinho 2",
-    "url": "/videos/gatinho2.mp4",
+    "url": "/videos/gatinho.mp4",
     "sizeBytes": 2100000,
     "priority": 1
   }
