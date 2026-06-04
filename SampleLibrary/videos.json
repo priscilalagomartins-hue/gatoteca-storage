@@ -1,0 +1,18 @@
+[
+  {
+    "id": "video001",
+    "title": "Video da Familia 1",
+    "url": "https://seudominio.com/videos/video001.mp4",
+    "thumbnail": "https://seudominio.com/thumbs/video001.jpg",
+    "sizeBytes": 524288000,
+    "priority": 1
+  },
+  {
+    "id": "video002",
+    "title": "Video da Familia 2",
+    "url": "https://seudominio.com/videos/video002.mp4",
+    "thumbnail": "https://seudominio.com/thumbs/video002.jpg",
+    "sizeBytes": 314572800,
+    "priority": 2
+  }
+]
