@@ -27,4 +27,6 @@ export interface DownloadReport {
   failed: DownloadFailure[];
   cancelled: boolean;
   usedBytes: number;
+  copiesCreated?: number;
+  stopReason?: 'estimated_limit' | 'quota' | 'cancelled' | 'finished';
 }

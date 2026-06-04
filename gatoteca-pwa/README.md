@@ -1,35 +1,34 @@
 # Gatoteca Storage PWA
 
-Esta é a versão PWA da Gatoteca Storage, criada com React, TypeScript, Vite, IndexedDB, Service Worker e Manifest.
+Esta e a versao PWA da Gatoteca Storage, criada com React, TypeScript, Vite, IndexedDB, Service Worker e Manifest.
 
-A versão iOS nativa em SwiftUI foi preservada fora desta pasta e o backup solicitado fica em `../backup-ios-swiftui`.
+A versao iOS nativa em SwiftUI foi preservada fora desta pasta e o backup solicitado fica em `../backup-ios-swiftui`.
 
 ## Funcionalidades
 
-- Dashboard com quantidade de vídeos baixados, espaço usado e limite configurado.
-- Configuração de limite da Gatoteca: 2 GB, 5 GB, 10 GB, 20 GB ou personalizado.
-- Biblioteca online carregada de um JSON remoto.
-- Download individual com verificação de espaço dentro do limite escolhido.
-- Botão `Baixar tudo que couber`, com seleção automática por prioridade e confirmação.
-- Fila de downloads sequencial com progresso geral, progresso individual, cancelamento e relatório.
-- Armazenamento local dos vídeos em IndexedDB.
-- Tela `Meus Vídeos` com assistir, apagar um vídeo e apagar todos.
-- Reprodução offline dos vídeos já baixados.
-- Manifest e Service Worker para instalação como PWA.
-- Página de ajuda para instalação em iPhone, Android, Windows e Mac.
+- Dashboard com espaco usado pela Gatoteca, espaco estimado disponivel para a PWA e espaco restante estimado.
+- Biblioteca online carregada automaticamente de `/library.json`.
+- Download individual dos videos listados.
+- Botao `Baixar tudo que couber`, que baixa o primeiro video e cria copias locais ate preencher o espaco estimado disponivel.
+- Fila de downloads com progresso geral, progresso individual, cancelamento e relatorio.
+- Armazenamento local dos videos em IndexedDB.
+- Tela `Meus Videos` com assistir, apagar um video e apagar tudo com confirmacao.
+- Reproducao offline dos videos ja baixados.
+- Manifest e Service Worker para instalacao como PWA.
+- Secao de ajuda com instalacao e aviso admin sobre hospedagem externa ou local dos videos.
 
-## Limitação importante da PWA
+## Limitacao importante da PWA
 
-Browsers não permitem que uma PWA consulte com precisão o espaço livre real do iPhone, Android, Windows ou Mac. Por isso, a Gatoteca PWA usa um limite escolhido pela usuária e controla apenas os vídeos que ela mesma salvou no IndexedDB.
+Browsers nao permitem que uma PWA consulte com precisao o espaco livre real do iPhone, Android, Windows ou Mac. Por isso, a Gatoteca usa `navigator.storage.estimate()` para mostrar apenas a estimativa de armazenamento disponivel para a propria PWA/origem.
 
-O navegador ainda pode aplicar quotas próprias de armazenamento. Em iPhone, grandes bibliotecas offline podem depender das regras do Safari/iOS.
+O navegador ainda pode aplicar quotas proprias de armazenamento. Em iPhone, grandes bibliotecas offline podem depender das regras do Safari/iOS.
 
 ## Requisitos
 
 - Node.js 18 ou superior
 - npm
 
-## Instalar dependências
+## Instalar dependencias
 
 ```bash
 npm install
@@ -41,100 +40,84 @@ npm install
 npm run dev
 ```
 
-Depois abra o endereço mostrado pelo Vite, normalmente:
+Depois abra o endereco mostrado pelo Vite, normalmente:
 
 ```text
 http://localhost:5173
 ```
 
-## Gerar build de produção
+## Gerar build de producao
 
 ```bash
 npm run build
 ```
 
-Os arquivos finais serão gerados em:
+Os arquivos finais serao gerados em:
 
 ```text
 dist/
 ```
 
-## Visualizar o build de produção
+## Visualizar o build de producao
 
 ```bash
 npm run preview
 ```
 
-## Publicar
+## Biblioteca local publicada
 
-A PWA precisa ser servida via HTTPS para instalação e Service Worker em celulares. Você pode publicar o conteúdo de `dist/` em serviços como:
-
-- GitHub Pages
-- Vercel
-- Netlify
-- Cloudflare Pages
-- Servidor próprio com HTTPS
-
-Fluxo geral:
-
-```bash
-npm install
-npm run build
-```
-
-Depois envie a pasta `dist/` para o serviço escolhido.
-
-## Alterar a URL do JSON remoto
-
-No app, abra `Ajustes` e altere o campo `URL da biblioteca online`.
-
-A URL padrão fica em:
+O app carrega automaticamente:
 
 ```text
-src/lib/settings.ts
+/library.json
 ```
 
-Constante:
+Esse arquivo vem de:
 
-```ts
-export const DEFAULT_LIBRARY_URL = 'https://example.com/gatoteca/videos.json';
+```text
+public/library.json
 ```
 
-## Formato do JSON remoto
+## Formato do JSON
 
 ```json
 [
   {
-    "id": "video001",
-    "title": "Video da Familia 1",
-    "url": "https://seudominio.com/videos/video001.mp4",
-    "thumbnail": "https://seudominio.com/thumbs/video001.jpg",
-    "sizeBytes": 524288000,
+    "id": "gatinho001",
+    "title": "Video Gatinho",
+    "url": "/videos/gatinho.mp4",
+    "sizeBytes": 2100000,
     "priority": 1
   }
 ]
 ```
 
-Campos:
-
-- `id`: identificador único.
-- `title`: nome do vídeo.
-- `url`: link direto para o MP4.
+- `id`: identificador unico.
+- `title`: nome do video.
+- `url`: link direto para o MP4. Pode ser relativo, como `/videos/gatinho.mp4`.
 - `thumbnail`: imagem de capa opcional.
 - `sizeBytes`: tamanho estimado em bytes.
-- `priority`: prioridade opcional. Números menores entram antes na fila automática.
+- `priority`: prioridade opcional.
+
+## Publicar
+
+A PWA precisa ser servida via HTTPS para instalacao e Service Worker em celulares. Voce pode publicar o conteudo de `dist/` em servicos como:
+
+- GitHub Pages
+- Vercel
+- Netlify
+- Cloudflare Pages
+- Servidor proprio com HTTPS
 
 ## CORS
 
-Para downloads funcionarem no navegador, o domínio dos vídeos e thumbnails deve permitir acesso pela origem onde a PWA está publicada.
+Para downloads externos funcionarem no navegador, o dominio dos videos e thumbnails deve permitir acesso pela origem onde a PWA esta publicada.
 
-Exemplo de header recomendado no servidor dos vídeos:
+Exemplo de header recomendado:
 
 ```text
 Access-Control-Allow-Origin: *
 ```
-
-Ou restrinja para o domínio da sua PWA.
 
 ## Instalar no aparelho
 
@@ -142,7 +125,7 @@ Ou restrinja para o domínio da sua PWA.
 
 1. Abra a PWA no Safari.
 2. Toque em Compartilhar.
-3. Escolha `Adicionar à Tela de Início`.
+3. Escolha `Adicionar a Tela de Inicio`.
 
 ### Android
 
@@ -152,10 +135,14 @@ Ou restrinja para o domínio da sua PWA.
 
 ### Windows e Mac
 
-No Chrome ou Edge, use o ícone de instalação na barra de endereço ou o menu do navegador.
+No Chrome ou Edge, use o icone de instalacao na barra de endereco ou o menu do navegador.
 
-## Segurança
+## Seguranca
 
-- A PWA não pede acesso a Fotos, Arquivos, Contatos, Localização, Câmera ou Microfone.
-- Ela não lista arquivos do aparelho.
-- Ela apaga apenas registros e blobs salvos pela própria Gatoteca no IndexedDB.
+- A PWA nao pede acesso a Fotos, Arquivos, Contatos, Localizacao, Camera ou Microfone.
+- Ela nao lista arquivos do aparelho.
+- Ela apaga apenas registros e blobs salvos pela propria Gatoteca no IndexedDB.
+
+## Deploy na Vercel
+
+Veja o passo a passo em [README_DEPLOY.md](</C:/Users/Claudio/OneDrive/Documentos/Gatoteca Storage/gatoteca-pwa/README_DEPLOY.md>).

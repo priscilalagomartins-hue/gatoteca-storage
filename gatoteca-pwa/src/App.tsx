@@ -1,19 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import packageJson from '../package.json';
 import { clearStoredVideos, deleteStoredVideo, getStoredVideos, getUsedBytes, saveStoredVideo } from './lib/db';
 import { downloadBlob, type DownloadHandle } from './lib/download';
 import { formatBytes, formatDate } from './lib/format';
 import { fetchVideoLibrary } from './lib/library';
-import {
-  DEFAULT_LIBRARY_URL,
-  getLibraryUrl,
-  getStorageLimit,
-  saveLibraryUrl,
-  saveStorageLimit,
-  STORAGE_LIMIT_OPTIONS
-} from './lib/settings';
+import { readStorageEstimate, STORAGE_SAFETY_MARGIN_BYTES, type StorageEstimateSnapshot } from './lib/storageEstimate';
 import type { DownloadFailure, DownloadReport, StoredVideo, VideoItem } from './types/video';
 
-type Screen = 'dashboard' | 'online' | 'downloads' | 'local' | 'settings' | 'install';
+type Screen = 'dashboard' | 'online' | 'downloads' | 'local' | 'help';
 
 type QueueState = {
   isRunning: boolean;
@@ -22,15 +16,22 @@ type QueueState = {
   completed: number;
   total: number;
   failures: DownloadFailure[];
+  copiesCreated: number;
+  currentUsedBytes: number;
+  estimatedRemainingBytes: null | number;
   report?: DownloadReport;
 };
 
-type DownloadPlan = {
-  videos: VideoItem[];
-  usedBytes: number;
-  limitBytes: number;
-  availableBytes: number;
-  requiredBytes: number;
+type CopyPlan = {
+  baseVideo: VideoItem;
+  estimatedAvailableBytes: null | number;
+  estimatedRemainingBytes: null | number;
+  estimatedCopies: null | number;
+};
+
+type DeleteAllPlan = {
+  count: number;
+  bytesToFree: number;
 };
 
 type PlayerState = {
@@ -38,39 +39,66 @@ type PlayerState = {
   url: string;
 };
 
+type NavItem = {
+  screen: Screen;
+  label: string;
+  icon: IconName;
+};
+
+type IconName = 'home' | 'paw' | 'box' | 'film' | 'help' | 'cat' | 'basket' | 'sparkle' | 'refresh' | 'phone';
+
+const APP_VERSION = packageJson.version;
+const NAV_ITEMS: NavItem[] = [
+  { screen: 'dashboard', label: 'Casinha dos Ronrons', icon: 'home' },
+  { screen: 'online', label: 'Buscar Gatinhos', icon: 'paw' },
+  { screen: 'downloads', label: 'Ninhada de Downloads', icon: 'box' },
+  { screen: 'local', label: 'Gatoteca Local', icon: 'film' },
+  { screen: 'help', label: 'Informacoes', icon: 'help' }
+];
+
 const initialQueue: QueueState = {
   isRunning: false,
   currentTitle: '',
   currentProgress: 0,
   completed: 0,
   total: 0,
-  failures: []
+  failures: [],
+  copiesCreated: 0,
+  currentUsedBytes: 0,
+  estimatedRemainingBytes: null
 };
 
 function App() {
   const [screen, setScreen] = useState<Screen>('dashboard');
   const [storedVideos, setStoredVideos] = useState<StoredVideo[]>([]);
   const [onlineVideos, setOnlineVideos] = useState<VideoItem[]>([]);
-  const [storageLimit, setStorageLimit] = useState(getStorageLimit);
-  const [libraryUrl, setLibraryUrl] = useState(getLibraryUrl);
-  const [customLimitGb, setCustomLimitGb] = useState((getStorageLimit() / 1024 / 1024 / 1024).toString());
+  const [storageEstimate, setStorageEstimate] = useState<StorageEstimateSnapshot>({
+    quotaBytes: null,
+    usageBytes: null,
+    availableBytes: null,
+    remainingBytes: null,
+    supported: false
+  });
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false);
   const [message, setMessage] = useState('');
   const [queue, setQueue] = useState<QueueState>(initialQueue);
-  const [pendingPlan, setPendingPlan] = useState<DownloadPlan | null>(null);
+  const [pendingCopyPlan, setPendingCopyPlan] = useState<CopyPlan | null>(null);
+  const [pendingDeleteAllPlan, setPendingDeleteAllPlan] = useState<DeleteAllPlan | null>(null);
   const [player, setPlayer] = useState<PlayerState | null>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const cancelRequested = useRef(false);
   const activeDownload = useRef<DownloadHandle | null>(null);
 
-  const usedBytes = useMemo(() => getUsedBytes(storedVideos), [storedVideos]);
-  const availableBytes = Math.max(storageLimit - usedBytes, 0);
+  const usedBytes = getUsedBytes(storedVideos);
   const downloadedIds = useMemo(() => new Set(storedVideos.map((video) => video.id)), [storedVideos]);
-  const storagePercent = storageLimit > 0 ? Math.min((usedBytes / storageLimit) * 100, 100) : 0;
+  const storagePercent =
+    storageEstimate.availableBytes && storageEstimate.availableBytes > 0
+      ? Math.min((usedBytes / storageEstimate.availableBytes) * 100, 100)
+      : 0;
 
   useEffect(() => {
-    refreshStoredVideos();
+    void refreshAll();
   }, []);
 
   useEffect(() => {
@@ -83,12 +111,29 @@ function App() {
     };
   }, []);
 
-  async function refreshStoredVideos() {
-    try {
-      setStoredVideos(await getStoredVideos());
-    } catch {
-      setMessage('Não foi possível abrir a cestinha local da Gatoteca.');
+  useEffect(() => {
+    if (screen === 'online' && onlineVideos.length === 0 && !isLoadingLibrary) {
+      void loadOnlineLibrary(true);
     }
+  }, [screen, onlineVideos.length, isLoadingLibrary]);
+
+  function handleTabChange(nextScreen: Screen) {
+    setScreen(nextScreen);
+  }
+
+  async function refreshAll() {
+    try {
+      const refreshedVideos = await getStoredVideos();
+      setStoredVideos(refreshedVideos);
+      setStorageEstimate(await readStorageEstimate(getUsedBytes(refreshedVideos)));
+    } catch {
+      setMessage('Nao foi possivel abrir a cestinha local da Gatoteca.');
+    }
+  }
+
+  async function refreshEstimateOnly(nextVideos?: StoredVideo[]) {
+    const sourceVideos = nextVideos ?? (await getStoredVideos());
+    setStorageEstimate(await readStorageEstimate(getUsedBytes(sourceVideos)));
   }
 
   async function loadOnlineLibrary(force = false): Promise<VideoItem[]> {
@@ -100,96 +145,54 @@ function App() {
     setMessage('');
 
     try {
-      const videos = await fetchVideoLibrary(libraryUrl);
+      const videos = await fetchVideoLibrary();
       setOnlineVideos(videos);
       return videos;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Não conseguimos carregar a biblioteca online.';
-      setMessage(errorMessage);
+    } catch {
+      setMessage('Nao foi possivel carregar a biblioteca de videos da Gatoteca.');
       return [];
     } finally {
       setIsLoadingLibrary(false);
     }
   }
 
-  function orderedCandidates(videos: VideoItem[]) {
-    return videos
-      .map((video, index) => ({ video, index }))
-      .filter(({ video }) => !downloadedIds.has(video.id))
-      .sort((left, right) => {
-        const leftPriority = left.video.priority;
-        const rightPriority = right.video.priority;
+  async function startSingleDownload(video: VideoItem) {
+    if (downloadedIds.has(video.id)) {
+      setMessage('Esse gatinho de video ja esta salvo na Gatoteca.');
+      return;
+    }
 
-        if (leftPriority !== undefined && rightPriority !== undefined) {
-          return leftPriority === rightPriority ? left.index - right.index : leftPriority - rightPriority;
-        }
-
-        if (leftPriority !== undefined) {
-          return -1;
-        }
-
-        if (rightPriority !== undefined) {
-          return 1;
-        }
-
-        return left.index - right.index;
-      })
-      .map(({ video }) => video);
+    await startSequentialDownloads([video]);
   }
 
-  async function prepareDownloadEverything() {
-    const videos = await loadOnlineLibrary();
+  async function prepareFillAvailableSpace() {
+    const videos = await loadOnlineLibrary(true);
     if (videos.length === 0) {
       return;
     }
 
-    await refreshStoredVideos();
+    const firstVideo = videos[0];
+    const refreshedVideos = await getStoredVideos();
+    const refreshedEstimate = await readStorageEstimate(getUsedBytes(refreshedVideos));
+    setStoredVideos(refreshedVideos);
+    setStorageEstimate(refreshedEstimate);
 
-    const freshVideos = await getStoredVideos();
-    const freshUsedBytes = getUsedBytes(freshVideos);
-    let remaining = Math.max(storageLimit - freshUsedBytes, 0);
-    const freshDownloadedIds = new Set(freshVideos.map((video) => video.id));
-    const selected: VideoItem[] = [];
+    const remainingBytes = refreshedEstimate.remainingBytes;
+    const estimatedCopies =
+      remainingBytes !== null && firstVideo.sizeBytes > 0 ? Math.max(Math.floor(remainingBytes / firstVideo.sizeBytes), 0) : null;
 
-    for (const video of orderedCandidates(videos).filter((video) => !freshDownloadedIds.has(video.id))) {
-      if (video.sizeBytes <= remaining) {
-        selected.push(video);
-        remaining -= video.sizeBytes;
-      }
-    }
-
-    if (selected.length === 0) {
-      setMessage('Não encontramos vídeos novos que caibam no limite atual da Gatoteca.');
-      return;
-    }
-
-    setPendingPlan({
-      videos: selected,
-      usedBytes: freshUsedBytes,
-      limitBytes: storageLimit,
-      availableBytes: Math.max(storageLimit - freshUsedBytes, 0),
-      requiredBytes: selected.reduce((total, video) => total + video.sizeBytes, 0)
+    setPendingCopyPlan({
+      baseVideo: firstVideo,
+      estimatedAvailableBytes: refreshedEstimate.availableBytes,
+      estimatedRemainingBytes: remainingBytes,
+      estimatedCopies
     });
   }
 
-  async function startSingleDownload(video: VideoItem) {
-    if (downloadedIds.has(video.id)) {
-      setMessage('Esse vídeo já está salvo na Gatoteca.');
-      return;
-    }
-
-    if (video.sizeBytes > availableBytes) {
-      setMessage('Esse vídeo é grandinho demais para o limite livre de agora.');
-      return;
-    }
-
-    await startQueue([video]);
-  }
-
-  async function startQueue(videos: VideoItem[]) {
+  async function startSequentialDownloads(videos: VideoItem[]) {
     setScreen('downloads');
     setMessage('');
-    setPendingPlan(null);
+    setPendingCopyPlan(null);
     cancelRequested.current = false;
 
     const failures: DownloadFailure[] = [];
@@ -202,7 +205,11 @@ function App() {
       currentProgress: 0,
       completed: 0,
       total: videos.length,
-      failures
+      failures,
+      copiesCreated: 0,
+      currentUsedBytes: usedBytes,
+      estimatedRemainingBytes: storageEstimate.remainingBytes,
+      report: undefined
     });
 
     for (const video of videos) {
@@ -217,17 +224,10 @@ function App() {
           currentProgress: 0
         }));
 
-        const latestVideos = await getStoredVideos();
-        const latestUsedBytes = getUsedBytes(latestVideos);
-
-        if (latestVideos.some((stored) => stored.id === video.id)) {
+        if ((await getStoredVideos()).some((stored) => stored.id === video.id)) {
           processed += 1;
           setQueue((current) => ({ ...current, completed: processed }));
           continue;
-        }
-
-        if (latestUsedBytes + video.sizeBytes > storageLimit) {
-          throw new Error('Esse vídeo é grandinho demais para o limite livre de agora.');
         }
 
         const handle = downloadBlob(video.url, (progress) => {
@@ -238,18 +238,11 @@ function App() {
         const blob = await handle.promise;
         activeDownload.current = null;
 
-        const actualSize = blob.size || video.sizeBytes;
-        const usedAfterDownload = getUsedBytes(await getStoredVideos()) + actualSize;
-
-        if (usedAfterDownload > storageLimit) {
-          throw new Error('O arquivo baixado ficou maior que o espaço reservado para a Gatoteca.');
-        }
-
         await saveStoredVideo({
           id: video.id,
           title: video.title,
           url: video.url,
-          sizeBytes: actualSize,
+          sizeBytes: blob.size || video.sizeBytes,
           downloadedAt: new Date().toISOString(),
           blob
         });
@@ -270,24 +263,35 @@ function App() {
       } finally {
         if (!cancelRequested.current) {
           processed += 1;
+          const refreshed = await getStoredVideos();
+          const refreshedUsedBytes = getUsedBytes(refreshed);
+          const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+          setStoredVideos(refreshed);
+          setStorageEstimate(refreshedEstimate);
           setQueue((current) => ({
             ...current,
             completed: processed,
-            failures: [...failures]
+            failures: [...failures],
+            currentUsedBytes: refreshedUsedBytes,
+            estimatedRemainingBytes: refreshedEstimate.remainingBytes
           }));
         }
       }
     }
 
     const refreshed = await getStoredVideos();
+    const refreshedUsedBytes = getUsedBytes(refreshed);
+    const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
     const report: DownloadReport = {
       succeeded,
       failed: [...failures],
       cancelled: cancelRequested.current,
-      usedBytes: getUsedBytes(refreshed)
+      usedBytes: refreshedUsedBytes,
+      stopReason: cancelRequested.current ? 'cancelled' : 'finished'
     };
 
     setStoredVideos(refreshed);
+    setStorageEstimate(refreshedEstimate);
     setQueue({
       isRunning: false,
       currentTitle: '',
@@ -295,8 +299,151 @@ function App() {
       completed: processed,
       total: videos.length,
       failures: [...failures],
+      copiesCreated: 0,
+      currentUsedBytes: refreshedUsedBytes,
+      estimatedRemainingBytes: refreshedEstimate.remainingBytes,
       report
     });
+
+  }
+
+  async function fillAvailableSpaceWithCopies(plan: CopyPlan) {
+    const { baseVideo } = plan;
+    setScreen('downloads');
+    setMessage('');
+    setPendingCopyPlan(null);
+    cancelRequested.current = false;
+
+    let downloadBlobOnce: Blob | null = null;
+    const failures: DownloadFailure[] = [];
+    let copiesCreated = 0;
+    let stopReason: DownloadReport['stopReason'] = 'finished';
+
+    setQueue({
+      isRunning: true,
+      currentTitle: baseVideo.title,
+      currentProgress: 0,
+      completed: 0,
+      total: Math.max(plan.estimatedCopies ?? 0, 1),
+      failures,
+      copiesCreated: 0,
+      currentUsedBytes: usedBytes,
+      estimatedRemainingBytes: storageEstimate.remainingBytes,
+      report: undefined
+    });
+
+    try {
+      const handle = downloadBlob(baseVideo.url, (progress) => {
+        setQueue((current) => ({ ...current, currentProgress: progress }));
+      });
+      activeDownload.current = handle;
+      downloadBlobOnce = await handle.promise;
+      activeDownload.current = null;
+    } catch (error) {
+      activeDownload.current = null;
+      setQueue({
+        ...initialQueue,
+        report: {
+          succeeded: 0,
+          failed: [
+            {
+              id: baseVideo.id,
+              title: baseVideo.title,
+              message: error instanceof Error ? error.message : 'Nao foi possivel baixar o video base.'
+            }
+          ],
+          cancelled: false,
+          usedBytes,
+          copiesCreated: 0,
+          stopReason: 'finished'
+        }
+      });
+      return;
+    }
+
+    while (!cancelRequested.current && downloadBlobOnce) {
+      const refreshedVideos = await getStoredVideos();
+      const refreshedUsedBytes = getUsedBytes(refreshedVideos);
+      const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+      const blobSize = downloadBlobOnce.size || baseVideo.sizeBytes;
+      const nextCopyNumber = copiesCreated + 1;
+      const nextId = `${baseVideo.id}-copy-${String(nextCopyNumber).padStart(6, '0')}`;
+
+      if (
+        refreshedEstimate.remainingBytes !== null &&
+        refreshedEstimate.remainingBytes > 0 &&
+        blobSize > refreshedEstimate.remainingBytes
+      ) {
+        stopReason = 'estimated_limit';
+        break;
+      }
+
+      try {
+        await saveStoredVideo({
+          id: nextId,
+          title: `${baseVideo.title} (copia ${String(nextCopyNumber).padStart(6, '0')})`,
+          url: baseVideo.url,
+          sizeBytes: blobSize,
+          downloadedAt: new Date().toISOString(),
+          blob: downloadBlobOnce
+        });
+
+        copiesCreated += 1;
+        const afterSaveVideos = await getStoredVideos();
+        const afterSaveUsedBytes = getUsedBytes(afterSaveVideos);
+        const afterSaveEstimate = await readStorageEstimate(afterSaveUsedBytes);
+        setStoredVideos(afterSaveVideos);
+        setStorageEstimate(afterSaveEstimate);
+        setQueue((current) => ({
+          ...current,
+          currentProgress: 1,
+          completed: copiesCreated,
+          total: Math.max(current.total, copiesCreated),
+          copiesCreated,
+          currentUsedBytes: afterSaveUsedBytes,
+          estimatedRemainingBytes: afterSaveEstimate.remainingBytes
+        }));
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : 'O navegador recusou mais armazenamento.';
+        failures.push({
+          id: nextId,
+          title: baseVideo.title,
+          message: messageText
+        });
+        stopReason = isQuotaError(error) ? 'quota' : 'finished';
+        break;
+      }
+    }
+
+    if (cancelRequested.current) {
+      stopReason = 'cancelled';
+    }
+
+    const refreshed = await getStoredVideos();
+    const refreshedUsedBytes = getUsedBytes(refreshed);
+    const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+    setStoredVideos(refreshed);
+    setStorageEstimate(refreshedEstimate);
+    setQueue({
+      isRunning: false,
+      currentTitle: '',
+      currentProgress: 0,
+      completed: copiesCreated,
+      total: Math.max(plan.estimatedCopies ?? copiesCreated, copiesCreated),
+      failures: [...failures],
+      copiesCreated,
+      currentUsedBytes: refreshedUsedBytes,
+      estimatedRemainingBytes: refreshedEstimate.remainingBytes,
+      report: {
+        succeeded: copiesCreated,
+        failed: [...failures],
+        cancelled: stopReason === 'cancelled',
+        usedBytes: refreshedUsedBytes,
+        copiesCreated,
+        stopReason
+      }
+    });
+
   }
 
   function cancelDownloads() {
@@ -319,81 +466,75 @@ function App() {
   }
 
   async function removeVideo(video: StoredVideo) {
-    if (!window.confirm('Tem certeza que deseja apagar este vídeo baixado pela Gatoteca?')) {
+    if (!window.confirm('Tem certeza que deseja soltar este gatinho da Gatoteca?')) {
       return;
     }
 
     await deleteStoredVideo(video.id);
-    await refreshStoredVideos();
+    const refreshed = await getStoredVideos();
+    setStoredVideos(refreshed);
+    await refreshEstimateOnly(refreshed);
+    setOnlineVideos((current) => [...current]);
   }
 
-  async function removeAllVideos() {
-    if (!window.confirm('Tem certeza que deseja apagar todos os vídeos baixados pela Gatoteca?')) {
+  function prepareDeleteAll() {
+    if (storedVideos.length === 0) {
       return;
     }
 
+    setPendingDeleteAllPlan({
+      count: storedVideos.length,
+      bytesToFree: usedBytes
+    });
+  }
+
+  async function confirmDeleteAll() {
     await clearStoredVideos();
-    await refreshStoredVideos();
-  }
-
-  function updateLimit(nextLimit: number) {
-    setStorageLimit(nextLimit);
-    setCustomLimitGb((nextLimit / 1024 / 1024 / 1024).toString());
-    saveStorageLimit(nextLimit);
-  }
-
-  function saveCustomLimit() {
-    const parsed = Number(customLimitGb.replace(',', '.'));
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      setMessage('Escolha um limite personalizado maior que zero.');
-      return;
-    }
-
-    updateLimit(parsed * 1024 * 1024 * 1024);
-    setMessage('Limite personalizado salvo.');
-  }
-
-  function saveRemoteUrl() {
-    const nextUrl = libraryUrl.trim() || DEFAULT_LIBRARY_URL;
-    setLibraryUrl(nextUrl);
-    saveLibraryUrl(nextUrl);
-    setOnlineVideos([]);
-    setMessage('URL da biblioteca online salva.');
+    setPendingDeleteAllPlan(null);
+    const refreshed: StoredVideo[] = [];
+    setStoredVideos(refreshed);
+    await refreshEstimateOnly(refreshed);
+    setOnlineVideos((current) => [...current]);
   }
 
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div>
+        <div className="hero-copy">
           <p className="eyebrow">Gatoteca Storage PWA</p>
-          <h1>Espaço para mais ronrons</h1>
+          <h1>Um cantinho fofo para guardar seus ronrons em video</h1>
+          <p className="hero-subtitle">Leve, rapido e so com o espacinho local da sua propria Gatoteca.</p>
         </div>
         <div className="paw-mark" aria-hidden="true">
-          🐾
+          <CatIcon name="cat" />
         </div>
       </header>
 
-      {!isOnline && (
-        <div className="offline-banner">
-          Sem internet por agora. Seus vídeos baixados continuam disponíveis.
-        </div>
+      {!isOnline && <div className="offline-banner">Sem internet por agora. Seus gatinhos baixados continuam por aqui.</div>}
+
+      {!storageEstimate.supported && (
+        <div className="offline-banner">Nao foi possivel estimar o espaco disponivel neste navegador.</div>
       )}
 
       {message && (
         <div className="message" role="status">
-          {message}
-          <button type="button" onClick={() => setMessage('')} aria-label="Fechar aviso">
-            ×
+          <span>{message}</span>
+          <button type="button" className="icon-button" onClick={() => setMessage('')} aria-label="Fechar aviso">
+            x
           </button>
         </div>
       )}
 
-      <nav className="tab-bar" aria-label="Navegação principal">
-        <TabButton active={screen === 'dashboard'} label="Início" icon="⌂" onClick={() => setScreen('dashboard')} />
-        <TabButton active={screen === 'online'} label="Online" icon="↓" onClick={() => setScreen('online')} />
-        <TabButton active={screen === 'downloads'} label="Fila" icon="↧" onClick={() => setScreen('downloads')} />
-        <TabButton active={screen === 'local'} label="Meus Vídeos" icon="▶" onClick={() => setScreen('local')} />
-        <TabButton active={screen === 'settings'} label="Ajustes" icon="⚙" onClick={() => setScreen('settings')} />
+      <nav className="tab-bar" aria-label="Navegacao principal">
+        {NAV_ITEMS.map((item) => (
+          <TabButton
+            key={item.screen}
+            active={screen === item.screen}
+            label={item.label}
+            icon={item.icon}
+            onClick={() => handleTabChange(item.screen)}
+          />
+        ))}
       </nav>
 
       <main>
@@ -401,12 +542,12 @@ function App() {
           <DashboardScreen
             count={storedVideos.length}
             usedBytes={usedBytes}
-            storageLimit={storageLimit}
+            estimate={storageEstimate}
             storagePercent={storagePercent}
-            onRefresh={refreshStoredVideos}
-            onOpenOnline={() => setScreen('online')}
-            onOpenLocal={() => setScreen('local')}
-            onOpenSettings={() => setScreen('settings')}
+            onRefresh={refreshAll}
+            onOpenOnline={() => handleTabChange('online')}
+            onOpenLocal={() => handleTabChange('local')}
+            onOpenHelp={() => handleTabChange('help')}
           />
         )}
 
@@ -414,53 +555,54 @@ function App() {
           <OnlineScreen
             videos={onlineVideos}
             downloadedIds={downloadedIds}
-            availableBytes={availableBytes}
+            estimate={storageEstimate}
             isLoading={isLoadingLibrary}
             isDownloading={queue.isRunning}
-            onLoad={() => loadOnlineLibrary(true)}
+            onLoad={async () => {
+              await loadOnlineLibrary(true);
+            }}
             onDownload={startSingleDownload}
-            onDownloadEverything={prepareDownloadEverything}
+            onDownloadEverything={prepareFillAvailableSpace}
           />
         )}
 
         {screen === 'downloads' && <DownloadQueueScreen queue={queue} onCancel={cancelDownloads} />}
 
         {screen === 'local' && (
-          <LocalLibraryScreen videos={storedVideos} onPlay={playVideo} onDelete={removeVideo} onDeleteAll={removeAllVideos} />
+          <LocalLibraryScreen videos={storedVideos} onPlay={playVideo} onDelete={removeVideo} onDeleteAll={prepareDeleteAll} />
         )}
 
-        {screen === 'settings' && (
-          <SettingsScreen
-            storageLimit={storageLimit}
-            customLimitGb={customLimitGb}
-            libraryUrl={libraryUrl}
-            onLimitChange={updateLimit}
-            onCustomLimitChange={setCustomLimitGb}
-            onSaveCustomLimit={saveCustomLimit}
-            onLibraryUrlChange={setLibraryUrl}
-            onSaveLibraryUrl={saveRemoteUrl}
-            onInstallHelp={() => setScreen('install')}
+        {screen === 'help' && (
+          <HelpScreen
+            version={APP_VERSION}
+            onShowInstall={() => window.alert('No iPhone, abra a Gatoteca no Safari, toque em Compartilhar e escolha Adicionar a Tela de Inicio.')}
           />
         )}
-
-        {screen === 'install' && <InstallHelpScreen />}
       </main>
 
-      {pendingPlan && (
-        <ConfirmationModal
-          plan={pendingPlan}
-          onCancel={() => setPendingPlan(null)}
-          onConfirm={() => startQueue(pendingPlan.videos)}
+      {pendingCopyPlan && (
+        <CopyConfirmationModal
+          plan={pendingCopyPlan}
+          onCancel={() => setPendingCopyPlan(null)}
+          onConfirm={() => void fillAvailableSpaceWithCopies(pendingCopyPlan)}
+        />
+      )}
+
+      {pendingDeleteAllPlan && (
+        <DeleteAllConfirmationModal
+          plan={pendingDeleteAllPlan}
+          onCancel={() => setPendingDeleteAllPlan(null)}
+          onConfirm={() => void confirmDeleteAll()}
         />
       )}
 
       {player && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Player de vídeo">
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Player de video">
           <section className="player-modal">
             <div className="modal-header">
               <h2>{player.title}</h2>
               <button type="button" className="icon-button" onClick={closePlayer} aria-label="Fechar player">
-                ×
+                x
               </button>
             </div>
             <video src={player.url} controls autoPlay playsInline />
@@ -471,11 +613,20 @@ function App() {
   );
 }
 
-function TabButton(props: { active: boolean; label: string; icon: string; onClick: () => void }) {
+function isQuotaError(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { name?: string; message?: string };
+  return candidate.name === 'QuotaExceededError' || candidate.message?.toLowerCase().includes('quota') === true;
+}
+
+function TabButton(props: { active: boolean; label: string; icon: IconName; onClick: () => void }) {
   return (
     <button type="button" className={props.active ? 'tab active' : 'tab'} onClick={props.onClick}>
-      <span aria-hidden="true">{props.icon}</span>
-      {props.label}
+      <CatIcon name={props.icon} />
+      <span>{props.label}</span>
     </button>
   );
 }
@@ -483,54 +634,75 @@ function TabButton(props: { active: boolean; label: string; icon: string; onClic
 function DashboardScreen(props: {
   count: number;
   usedBytes: number;
-  storageLimit: number;
+  estimate: StorageEstimateSnapshot;
   storagePercent: number;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   onOpenOnline: () => void;
   onOpenLocal: () => void;
-  onOpenSettings: () => void;
+  onOpenHelp: () => void;
 }) {
   return (
     <section className="screen">
       <div className="metrics-grid">
-        <MetricCard title="Vídeos baixados" value={String(props.count)} icon="▶" />
-        <MetricCard title="Usado pela Gatoteca" value={formatBytes(props.usedBytes)} icon="🐾" />
-        <MetricCard title="Limite configurado" value={formatBytes(props.storageLimit)} icon="▣" />
+        <MetricCard title="Gatinhos Adotados" value={String(props.count)} icon="cat" accent="rose" />
+        <MetricCard title="Espaco Ocupado" value={formatBytes(props.usedBytes)} icon="paw" accent="peach" />
+        <MetricCard
+          title="Espaco para Novos Ronrons"
+          value={props.estimate.availableBytes !== null ? formatBytes(props.estimate.availableBytes) : 'Nao informado'}
+          icon="sparkle"
+          accent="gold"
+        />
+        <MetricCard
+          title="Cestinha Livre"
+          value={props.estimate.remainingBytes !== null ? formatBytes(props.estimate.remainingBytes) : 'Nao informado'}
+          icon="basket"
+          accent="cream"
+        />
       </div>
 
-      <div className="panel">
+      <div className="panel cozy-panel">
         <div className="panel-title">
           <h2>Cestinha dos gatinhos</h2>
-          <span>{Math.round(props.storagePercent)}%</span>
+          <span className="progress-chip">{Math.round(props.storagePercent)}%</span>
         </div>
         <div className="meter" aria-label="Uso do armazenamento">
           <span style={{ width: `${props.storagePercent}%` }} />
         </div>
-        <p>{formatBytes(Math.max(props.storageLimit - props.usedBytes, 0))} livres dentro do limite escolhido.</p>
+        <p>
+          Espaco restante estimado para a Gatoteca:{' '}
+          <strong>{props.estimate.remainingBytes !== null ? formatBytes(props.estimate.remainingBytes) : 'Nao informado'}</strong>
+        </p>
+        <p className="helper-copy">A Gatoteca usa apenas armazenamento local da PWA e cuida so dos videos que ela mesma guarda.</p>
       </div>
 
       <div className="action-grid">
-        <button type="button" className="primary" onClick={props.onRefresh}>
-          Atualizar
+        <button type="button" className="primary fluffy-button" onClick={props.onRefresh}>
+          <CatIcon name="refresh" />
+          <span>Procurar Ronrons</span>
         </button>
-        <button type="button" onClick={props.onOpenOnline}>
-          Biblioteca Online
+        <button type="button" className="fluffy-button" onClick={props.onOpenOnline}>
+          <CatIcon name="paw" />
+          <span>Biblioteca dos Gatinhos</span>
         </button>
-        <button type="button" onClick={props.onOpenLocal}>
-          Meus Vídeos
+        <button type="button" className="fluffy-button" onClick={props.onOpenLocal}>
+          <CatIcon name="film" />
+          <span>Ver Gatoteca</span>
         </button>
-        <button type="button" onClick={props.onOpenSettings}>
-          Configurar limite
+        <button type="button" className="fluffy-button" onClick={props.onOpenHelp}>
+          <CatIcon name="help" />
+          <span>Instalar Gatoteca</span>
         </button>
       </div>
     </section>
   );
 }
 
-function MetricCard(props: { title: string; value: string; icon: string }) {
+function MetricCard(props: { title: string; value: string; icon: IconName; accent: 'rose' | 'peach' | 'gold' | 'cream' }) {
   return (
-    <article className="metric-card">
-      <span aria-hidden="true">{props.icon}</span>
+    <article className={`metric-card accent-${props.accent}`}>
+      <div className="metric-icon">
+        <CatIcon name={props.icon} />
+      </div>
       <p>{props.title}</p>
       <strong>{props.value}</strong>
     </article>
@@ -540,37 +712,39 @@ function MetricCard(props: { title: string; value: string; icon: string }) {
 function OnlineScreen(props: {
   videos: VideoItem[];
   downloadedIds: Set<string>;
-  availableBytes: number;
+  estimate: StorageEstimateSnapshot;
   isLoading: boolean;
   isDownloading: boolean;
-  onLoad: () => void;
+  onLoad: () => void | Promise<void>;
   onDownload: (video: VideoItem) => void;
-  onDownloadEverything: () => void;
+  onDownloadEverything: () => void | Promise<void>;
 }) {
   return (
     <section className="screen">
       <div className="screen-heading">
         <div>
-          <p className="eyebrow">Biblioteca Online</p>
-          <h2>Baixar vídeos que cabem</h2>
+          <p className="eyebrow">Buscar Gatinhos</p>
+          <h2>Videos prontos para entrar na Gatoteca</h2>
         </div>
-        <button type="button" onClick={props.onLoad} disabled={props.isLoading}>
-          Atualizar
+        <button type="button" className="fluffy-button small" onClick={props.onLoad} disabled={props.isLoading}>
+          <CatIcon name="refresh" />
+          <span>Atualizar</span>
         </button>
       </div>
 
-      <button type="button" className="primary wide" onClick={props.onDownloadEverything} disabled={props.isDownloading || props.isLoading}>
-        Baixar tudo que couber
+      <button type="button" className="primary wide fluffy-button" onClick={props.onDownloadEverything} disabled={props.isDownloading || props.isLoading}>
+        <CatIcon name="paw" />
+        <span>Adotar Todos os Gatinhos Possiveis</span>
       </button>
 
-      {props.isLoading && <div className="loading">Carregando biblioteca online...</div>}
+      {props.isLoading && <div className="loading">A Gatoteca esta procurando novos ronrons...</div>}
 
       <div className="video-list">
         {props.videos.map((video) => (
           <OnlineVideoCard
             key={video.id}
             video={video}
-            status={getVideoStatus(video, props.downloadedIds, props.availableBytes)}
+            status={getVideoStatus(video, props.downloadedIds, props.estimate)}
             isDownloading={props.isDownloading}
             onDownload={() => props.onDownload(video)}
           />
@@ -578,22 +752,22 @@ function OnlineScreen(props: {
       </div>
 
       {!props.isLoading && props.videos.length === 0 && (
-        <EmptyState title="Nenhum vídeo carregado" text="Toque em Atualizar para buscar o JSON remoto." />
+        <EmptyState title="Nenhum gatinho apareceu" text="A biblioteca local /library.json sera lida automaticamente quando houver videos publicados." />
       )}
     </section>
   );
 }
 
-function getVideoStatus(video: VideoItem, downloadedIds: Set<string>, availableBytes: number) {
+function getVideoStatus(video: VideoItem, downloadedIds: Set<string>, estimate: StorageEstimateSnapshot) {
   if (downloadedIds.has(video.id)) {
-    return 'Já baixado';
+    return 'Ja adotado';
   }
 
-  if (video.sizeBytes > availableBytes) {
-    return 'Não cabe no limite';
+  if (estimate.remainingBytes !== null && video.sizeBytes > estimate.remainingBytes) {
+    return 'Nao cabe na cestinha';
   }
 
-  return 'Disponível';
+  return 'Pronto para ronronar';
 }
 
 function OnlineVideoCard(props: {
@@ -602,23 +776,24 @@ function OnlineVideoCard(props: {
   isDownloading: boolean;
   onDownload: () => void;
 }) {
-  const disabled = props.status === 'Já baixado' || props.isDownloading;
+  const disabled = props.status === 'Ja adotado' || props.isDownloading;
 
   return (
     <article className="video-card">
       <div className="thumbnail">
-        {props.video.thumbnail ? <img src={props.video.thumbnail} alt="" loading="lazy" /> : <span>🐾</span>}
+        {props.video.thumbnail ? <img src={props.video.thumbnail} alt="" loading="lazy" /> : <CatIcon name="cat" />}
       </div>
       <div className="video-card-content">
         <h3>{props.video.title}</h3>
         <div className="video-meta">
           <span>{formatBytes(props.video.sizeBytes)}</span>
-          <span className={`badge ${props.status === 'Disponível' ? 'ok' : props.status === 'Já baixado' ? 'saved' : 'warn'}`}>
+          <span className={`badge ${props.status === 'Pronto para ronronar' ? 'ok' : props.status === 'Ja adotado' ? 'saved' : 'warn'}`}>
             {props.status}
           </span>
         </div>
-        <button type="button" onClick={props.onDownload} disabled={disabled}>
-          Baixar
+        <button type="button" className="fluffy-button small" onClick={props.onDownload} disabled={disabled}>
+          <CatIcon name="paw" />
+          <span>Baixar</span>
         </button>
       </div>
     </article>
@@ -633,27 +808,35 @@ function DownloadQueueScreen(props: { queue: QueueState; onCancel: () => void })
     <section className="screen">
       <div className="screen-heading">
         <div>
-          <p className="eyebrow">Fila de Downloads</p>
-          <h2>Um vídeo por vez</h2>
+          <p className="eyebrow">Ninhada de Downloads</p>
+          <h2>Organizando os ronrons com carinho</h2>
         </div>
       </div>
 
       {props.queue.isRunning ? (
-        <div className="panel stack">
-          <ProgressBlock title="Progresso geral" value={overallProgress} text={`${props.queue.completed} concluídos, ${remaining} restantes`} />
+        <div className="panel stack cozy-panel">
+          <ProgressBlock title="Progresso geral da ninhada" value={overallProgress} text={`${props.queue.completed} concluidos, ${remaining} restantes`} />
           <ProgressBlock
-            title={props.queue.currentTitle || 'Preparando próximo vídeo'}
+            title={props.queue.currentTitle || 'Preparando a proxima copia'}
             value={props.queue.currentProgress * 100}
-            text={`${Math.round(props.queue.currentProgress * 100)}% deste vídeo`}
+            text={`${Math.round(props.queue.currentProgress * 100)}% do video base`}
           />
-          <button type="button" className="danger" onClick={props.onCancel}>
-            Cancelar downloads
+          <div className="progress-stats">
+            <p>Copias criadas: {props.queue.copiesCreated}</p>
+            <p>Espaco usado: {formatBytes(props.queue.currentUsedBytes)}</p>
+            <p>
+              Espaco restante estimado: {props.queue.estimatedRemainingBytes !== null ? formatBytes(props.queue.estimatedRemainingBytes) : 'Nao informado'}
+            </p>
+          </div>
+          <button type="button" className="danger fluffy-button" onClick={props.onCancel}>
+            <CatIcon name="basket" />
+            <span>Cancelar downloads</span>
           </button>
         </div>
       ) : props.queue.report ? (
         <Report report={props.queue.report} />
       ) : (
-        <EmptyState title="Nenhum download na fila" text="A fila aparece aqui quando você baixar vídeos." />
+        <EmptyState title="Nenhuma ninhada por aqui" text="Os downloads aparecem aqui quando a Gatoteca comeca a adotar videos." />
       )}
     </section>
   );
@@ -664,7 +847,7 @@ function ProgressBlock(props: { title: string; value: number; text: string }) {
     <div className="progress-block">
       <div className="panel-title">
         <h3>{props.title}</h3>
-        <span>{Math.round(props.value)}%</span>
+        <span className="progress-chip">{Math.round(props.value)}%</span>
       </div>
       <div className="meter">
         <span style={{ width: `${Math.min(Math.max(props.value, 0), 100)}%` }} />
@@ -676,13 +859,14 @@ function ProgressBlock(props: { title: string; value: number; text: string }) {
 
 function Report(props: { report: DownloadReport }) {
   return (
-    <div className="panel stack">
-      <h2>{props.report.cancelled ? 'Downloads cancelados' : 'Relatório final'}</h2>
-      <div className="metrics-grid">
-        <MetricCard title="Sucessos" value={String(props.report.succeeded)} icon="✓" />
-        <MetricCard title="Falhas" value={String(props.report.failed.length)} icon="!" />
-        <MetricCard title="Uso atual" value={formatBytes(props.report.usedBytes)} icon="🐾" />
+    <div className="panel stack cozy-panel">
+      <h2>Relatorio final dos ronrons</h2>
+      <div className="metrics-grid report-grid">
+        <MetricCard title="Copias criadas" value={String(props.report.copiesCreated ?? props.report.succeeded)} icon="box" accent="rose" />
+        <MetricCard title="Falhas" value={String(props.report.failed.length)} icon="help" accent="peach" />
+        <MetricCard title="Uso atual" value={formatBytes(props.report.usedBytes)} icon="paw" accent="gold" />
       </div>
+      <p>Motivo da parada: {describeStopReason(props.report.stopReason)}</p>
       {props.report.failed.length > 0 && (
         <div className="failure-list">
           {props.report.failed.map((failure) => (
@@ -697,6 +881,19 @@ function Report(props: { report: DownloadReport }) {
   );
 }
 
+function describeStopReason(reason: DownloadReport['stopReason']) {
+  switch (reason) {
+    case 'estimated_limit':
+      return 'espaco estimado atingido';
+    case 'quota':
+      return 'navegador recusou mais armazenamento';
+    case 'cancelled':
+      return 'cancelado pela usuaria';
+    default:
+      return 'processo concluido';
+  }
+}
+
 function LocalLibraryScreen(props: {
   videos: StoredVideo[];
   onPlay: (video: StoredVideo) => void;
@@ -707,12 +904,13 @@ function LocalLibraryScreen(props: {
     <section className="screen">
       <div className="screen-heading">
         <div>
-          <p className="eyebrow">Meus Vídeos</p>
-          <h2>Salvos na Gatoteca</h2>
+          <p className="eyebrow">Gatoteca Local</p>
+          <h2>Seus gatinhos salvos para ver offline</h2>
         </div>
         {props.videos.length > 0 && (
-          <button type="button" className="danger subtle" onClick={props.onDeleteAll}>
-            Apagar todos
+          <button type="button" className="danger subtle fluffy-button small" onClick={props.onDeleteAll}>
+            <CatIcon name="basket" />
+            <span>Abrir o Portao</span>
           </button>
         )}
       </div>
@@ -722,166 +920,117 @@ function LocalLibraryScreen(props: {
           <article className="local-card" key={video.id}>
             <h3>{video.title}</h3>
             <p>
-              {formatBytes(video.sizeBytes)} · {formatDate(video.downloadedAt)}
+              {formatBytes(video.sizeBytes)} | {formatDate(video.downloadedAt)}
             </p>
             <div className="row-actions">
-              <button type="button" onClick={() => props.onPlay(video)}>
-                Assistir
+              <button type="button" className="fluffy-button small" onClick={() => props.onPlay(video)}>
+                <CatIcon name="film" />
+                <span>Assistir</span>
               </button>
-              <button type="button" className="danger subtle" onClick={() => props.onDelete(video)}>
-                Apagar
+              <button type="button" className="danger subtle fluffy-button small" onClick={() => props.onDelete(video)}>
+                <CatIcon name="paw" />
+                <span>Soltar Gatinho</span>
               </button>
             </div>
           </article>
         ))}
       </div>
 
-      {props.videos.length === 0 && <EmptyState title="Nenhum vídeo baixado" text="Os vídeos salvos aparecem aqui e funcionam offline." />}
+      {props.videos.length === 0 && <EmptyState title="Nenhum gatinho descansando" text="Os videos salvos aparecem aqui e continuam funcionando offline." />}
     </section>
   );
 }
 
-function SettingsScreen(props: {
-  storageLimit: number;
-  customLimitGb: string;
-  libraryUrl: string;
-  onLimitChange: (bytes: number) => void;
-  onCustomLimitChange: (value: string) => void;
-  onSaveCustomLimit: () => void;
-  onLibraryUrlChange: (value: string) => void;
-  onSaveLibraryUrl: () => void;
-  onInstallHelp: () => void;
-}) {
-  const matchesPreset = STORAGE_LIMIT_OPTIONS.some((option) => option.value === props.storageLimit);
-
+function HelpScreen(props: { version: string; onShowInstall: () => void }) {
   return (
     <section className="screen">
       <div className="screen-heading">
         <div>
-          <p className="eyebrow">Configuração</p>
-          <h2>Limite da Gatoteca</h2>
+          <p className="eyebrow">Informacoes</p>
+          <h2>Sobre a Gatoteca</h2>
         </div>
       </div>
 
+      <div className="panel stack cozy-panel">
+        <p>A biblioteca e carregada automaticamente.</p>
+        <p>A Gatoteca usa apenas armazenamento local da PWA.</p>
+        <p>Nenhum arquivo do celular e acessado.</p>
+        <p>O espaco exibido e uma estimativa fornecida pelo navegador.</p>
+      </div>
+
       <div className="panel stack">
-        <p>
-          A PWA não consulta com precisão o espaço livre do aparelho. Escolha quanto a Gatoteca pode usar e ela controla
-          apenas os vídeos que baixou.
-        </p>
+        <h3>Versao do aplicativo</h3>
+        <p>{props.version}</p>
+      </div>
 
-        <div className="limit-grid">
-          {STORAGE_LIMIT_OPTIONS.map((option) => (
-            <button
-              type="button"
-              className={props.storageLimit === option.value ? 'selected' : ''}
-              key={option.value}
-              onClick={() => props.onLimitChange(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
-          <button type="button" className={!matchesPreset ? 'selected' : ''} onClick={props.onSaveCustomLimit}>
-            Personalizado
-          </button>
-        </div>
-
-        <label className="field">
-          Limite personalizado em GB
-          <input
-            inputMode="decimal"
-            value={props.customLimitGb}
-            onChange={(event) => props.onCustomLimitChange(event.target.value)}
-            placeholder="Ex.: 7.5"
-          />
-        </label>
-        <button type="button" onClick={props.onSaveCustomLimit}>
-          Salvar limite personalizado
+      <div className="panel stack">
+        <button type="button" className="fluffy-button" onClick={props.onShowInstall}>
+          <CatIcon name="phone" />
+          <span>Como instalar no iPhone</span>
         </button>
-      </div>
-
-      <div className="panel stack">
-        <h2>JSON remoto</h2>
-        <label className="field">
-          URL da biblioteca online
-          <input value={props.libraryUrl} onChange={(event) => props.onLibraryUrlChange(event.target.value)} />
-        </label>
-        <button type="button" onClick={props.onSaveLibraryUrl}>
-          Salvar URL
-        </button>
-      </div>
-
-      <button type="button" className="wide" onClick={props.onInstallHelp}>
-        Como instalar na tela inicial
-      </button>
-    </section>
-  );
-}
-
-function InstallHelpScreen() {
-  return (
-    <section className="screen">
-      <div className="screen-heading">
-        <div>
-          <p className="eyebrow">Instalação</p>
-          <h2>Adicionar à tela inicial</h2>
-        </div>
-      </div>
-
-      <div className="panel stack">
-        <h3>iPhone</h3>
-        <p>Abra no Safari, toque em Compartilhar e escolha Adicionar à Tela de Início.</p>
-      </div>
-
-      <div className="panel stack">
-        <h3>Android</h3>
-        <p>Abra no Chrome e toque em Instalar Aplicativo quando a opção aparecer no menu.</p>
-      </div>
-
-      <div className="panel stack">
-        <h3>Windows e Mac</h3>
-        <p>No Chrome ou Edge, use o ícone de instalação na barra de endereço ou o menu do navegador.</p>
       </div>
     </section>
   );
 }
 
-function ConfirmationModal(props: { plan: DownloadPlan; onCancel: () => void; onConfirm: () => void }) {
-  const afterDownload = props.plan.usedBytes + props.plan.requiredBytes;
-
+function CopyConfirmationModal(props: { plan: CopyPlan; onCancel: () => void; onConfirm: () => void }) {
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirmar downloads">
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirmar preenchimento da Gatoteca">
       <section className="confirm-modal">
-        <h2>Baixar tudo que couber</h2>
-        <p>Encontramos {props.plan.videos.length} vídeos que cabem no limite escolhido.</p>
+        <h2>Adotar todos os gatinhos possiveis</h2>
+        <p>A Gatoteca encontrou espaco para mais ronrons.</p>
+        <p>Deseja adotar todos os gatinhos que couberem na sua cestinha?</p>
         <dl>
           <div>
-            <dt>Limite configurado</dt>
-            <dd>{formatBytes(props.plan.limitBytes)}</dd>
+            <dt>Espaco estimado disponivel</dt>
+            <dd>{props.plan.estimatedAvailableBytes !== null ? formatBytes(props.plan.estimatedAvailableBytes) : 'Nao informado'}</dd>
           </div>
           <div>
-            <dt>Uso atual</dt>
-            <dd>{formatBytes(props.plan.usedBytes)}</dd>
+            <dt>Margem de seguranca</dt>
+            <dd>{formatBytes(STORAGE_SAFETY_MARGIN_BYTES)}</dd>
           </div>
           <div>
-            <dt>Disponível para downloads</dt>
-            <dd>{formatBytes(props.plan.availableBytes)}</dd>
+            <dt>Cestinha livre</dt>
+            <dd>{props.plan.estimatedRemainingBytes !== null ? formatBytes(props.plan.estimatedRemainingBytes) : 'Nao informado'}</dd>
           </div>
           <div>
-            <dt>Espaço necessário</dt>
-            <dd>{formatBytes(props.plan.requiredBytes)}</dd>
+            <dt>Tamanho do video base</dt>
+            <dd>{formatBytes(props.plan.baseVideo.sizeBytes)}</dd>
           </div>
           <div>
-            <dt>Uso estimado após download</dt>
-            <dd>{formatBytes(afterDownload)}</dd>
+            <dt>Copias estimadas</dt>
+            <dd>{props.plan.estimatedCopies !== null ? String(props.plan.estimatedCopies) : 'Ate o navegador permitir'}</dd>
           </div>
         </dl>
-        <p>Deseja baixar todos agora?</p>
         <div className="row-actions">
           <button type="button" onClick={props.onCancel}>
             Cancelar
           </button>
           <button type="button" className="primary" onClick={props.onConfirm}>
-            Baixar {props.plan.videos.length} vídeos
+            Adotar agora
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DeleteAllConfirmationModal(props: { plan: DeleteAllPlan; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirmar abrir o portao">
+      <section className="confirm-modal">
+        <h2>Abrir o Portao</h2>
+        <p>Todos os gatinhos serao soltos da Gatoteca. Deseja continuar?</p>
+        <p>
+          Serao liberados {props.plan.count} videos e aproximadamente {formatBytes(props.plan.bytesToFree)}.
+        </p>
+        <p>Nenhum arquivo fora da Gatoteca sera apagado.</p>
+        <div className="row-actions">
+          <button type="button" onClick={props.onCancel}>
+            Cancelar
+          </button>
+          <button type="button" className="danger" onClick={props.onConfirm}>
+            Abrir o Portao
           </button>
         </div>
       </section>
@@ -892,11 +1041,102 @@ function ConfirmationModal(props: { plan: DownloadPlan; onCancel: () => void; on
 function EmptyState(props: { title: string; text: string }) {
   return (
     <div className="empty-state">
-      <span aria-hidden="true">🐾</span>
+      <div className="empty-icon">
+        <CatIcon name="cat" />
+      </div>
       <h3>{props.title}</h3>
       <p>{props.text}</p>
     </div>
   );
+}
+
+function CatIcon(props: { name: IconName }) {
+  const common = { stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+
+  switch (props.name) {
+    case 'home':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M4 11.5 12 5l8 6.5" fill="none" />
+          <path {...common} d="M6.5 10.5V19h11v-8.5" fill="none" />
+          <path {...common} d="M9 13.5c0-1.4 1.3-2.5 3-2.5s3 1.1 3 2.5V19H9v-5.5Z" fill="none" />
+          <path {...common} d="M10 7.5 8.2 5.7 7.2 8.2M14 7.5l1.8-1.8 1 2.5" fill="none" />
+        </svg>
+      );
+    case 'paw':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle {...common} cx="8" cy="8" r="2.1" fill="none" />
+          <circle {...common} cx="16" cy="8" r="2.1" fill="none" />
+          <circle {...common} cx="6.3" cy="13.2" r="1.8" fill="none" />
+          <circle {...common} cx="17.7" cy="13.2" r="1.8" fill="none" />
+          <path {...common} d="M12 11.8c-3.1 0-5.2 2.1-5.2 4.4 0 1.8 1.5 2.8 3.2 2.8.9 0 1.5-.3 2-.8.5.5 1.1.8 2 .8 1.7 0 3.2-1 3.2-2.8 0-2.3-2.1-4.4-5.2-4.4Z" fill="none" />
+        </svg>
+      );
+    case 'box':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M4 8.5 12 4l8 4.5-8 4.5L4 8.5Z" fill="none" />
+          <path {...common} d="M4 8.5V17l8 4 8-4V8.5" fill="none" />
+          <path {...common} d="M12 13v8" fill="none" />
+          <path {...common} d="m9.3 5.5-1.4-1.9-1 2.7m7.8-.8 1.4-1.9 1 2.7" fill="none" />
+        </svg>
+      );
+    case 'film':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect {...common} x="4" y="5" width="16" height="14" rx="2.2" fill="none" />
+          <path {...common} d="M9.2 10.1v3.8l4-1.9-4-1.9Z" fill="none" />
+          <path {...common} d="M6.6 8h1.8M6.6 16h1.8M15.6 8h1.8M15.6 16h1.8" />
+        </svg>
+      );
+    case 'help':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M8.4 9.4a3.7 3.7 0 1 1 7.2 1.2c-.5 1.1-1.5 1.7-2.3 2.3-.7.5-1.3 1-1.3 2.1" fill="none" />
+          <path {...common} d="M11.9 17.7h.2" />
+          <path {...common} d="M6.5 8.2 5.2 6.1 8 6.3M17.5 8.2l1.3-2.1-2.8.2" fill="none" />
+          <path {...common} d="M12 21c5 0 9-4 9-9s-4-9-9-9-9 4-9 9 4 9 9 9Z" fill="none" />
+        </svg>
+      );
+    case 'basket':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M5 10h14l-1.1 8.1A2 2 0 0 1 15.9 20H8.1a2 2 0 0 1-2-1.9L5 10Z" fill="none" />
+          <path {...common} d="M8.5 10c0-2 1.6-3.5 3.5-3.5S15.5 8 15.5 10" fill="none" />
+          <path {...common} d="M9 13.5v3M12 13.5v3M15 13.5v3" />
+        </svg>
+      );
+    case 'sparkle':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M12 4.5 13.6 9l4.4 1.6-4.4 1.6L12 16.7l-1.6-4.5L6 10.6 10.4 9 12 4.5Z" fill="none" />
+          <path {...common} d="M18 4v2M19 5h-2M5 16.5v3M6.5 18H3.5" />
+        </svg>
+      );
+    case 'refresh':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M20 6.5V11h-4.5" fill="none" />
+          <path {...common} d="M19.5 11A7.5 7.5 0 1 1 12 4.5c2 0 3.9.8 5.3 2.1" fill="none" />
+        </svg>
+      );
+    case 'phone':
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect {...common} x="7" y="3.5" width="10" height="17" rx="2.2" fill="none" />
+          <path {...common} d="M10.5 6.5h3M11.2 17.4h1.6" />
+        </svg>
+      );
+    default:
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M6.3 9.2 8.6 5.6 11 8m7.7 1.2L16.4 5.6 14 8" fill="none" />
+          <path {...common} d="M6.5 10.5c0-2.6 2.5-4.7 5.5-4.7s5.5 2.1 5.5 4.7v2.3c0 3.2-2.5 5.7-5.5 5.7s-5.5-2.5-5.5-5.7v-2.3Z" fill="none" />
+          <path {...common} d="M9.6 11.7h.1M14.3 11.7h.1M10 14.7c.4.7 1.1 1 2 1s1.6-.3 2-1" />
+        </svg>
+      );
+  }
 }
 
 export default App;

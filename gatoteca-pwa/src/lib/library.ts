@@ -1,5 +1,7 @@
 import type { VideoItem } from '../types/video';
 
+const LIBRARY_URL = '/library.json';
+
 function isValidVideoItem(item: unknown): item is VideoItem {
   if (!item || typeof item !== 'object') {
     return false;
@@ -16,33 +18,33 @@ function isValidVideoItem(item: unknown): item is VideoItem {
   );
 }
 
-export async function fetchVideoLibrary(libraryUrl: string): Promise<VideoItem[]> {
+export async function fetchVideoLibrary(): Promise<VideoItem[]> {
   let response: Response;
 
   try {
-    response = await fetch(libraryUrl, { cache: 'no-store' });
+    response = await fetch(LIBRARY_URL, { cache: 'no-store' });
   } catch {
-    throw new Error('Sem internet ou lista online indisponível por agora.');
+    throw new Error('Sem internet ou lista online indisponivel por agora.');
   }
 
   if (!response.ok) {
-    throw new Error('A lista online de vídeos não respondeu como esperado.');
+    throw new Error('A lista online de videos nao respondeu como esperado.');
   }
 
   let json: unknown;
   try {
     json = await response.json();
   } catch {
-    throw new Error('A lista online veio em um formato que a Gatoteca não reconhece.');
+    throw new Error('A lista online veio em um formato que a Gatoteca nao reconhece.');
   }
 
   if (!Array.isArray(json)) {
-    throw new Error('A lista online precisa ser um array de vídeos.');
+    throw new Error('A lista online precisa ser um array de videos.');
   }
 
   const videos = json.filter(isValidVideoItem);
   if (videos.length === 0) {
-    throw new Error('A lista online está vazia por enquanto.');
+    throw new Error('A lista online esta vazia por enquanto.');
   }
 
   return videos;
