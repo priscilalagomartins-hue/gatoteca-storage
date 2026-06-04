@@ -1,0 +1,9 @@
+[
+  {
+    "id": "gatinho001",
+    "title": "Vídeo Gatinho",
+    "url": "/videos/gatinho.mp4",
+    "sizeBytes": 2100000,
+    "priority": 1
+  }
+]
