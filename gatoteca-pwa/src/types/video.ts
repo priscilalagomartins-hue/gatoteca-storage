@@ -28,5 +28,6 @@ export interface DownloadReport {
   cancelled: boolean;
   usedBytes: number;
   copiesCreated?: number;
-  stopReason?: 'estimated_limit' | 'quota' | 'cancelled' | 'finished';
+  initialEstimatedBytes?: number | null;
+  stopReason?: 'quota' | 'cancelled' | 'finished';
 }

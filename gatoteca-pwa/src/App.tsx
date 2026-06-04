@@ -73,10 +73,10 @@ function App() {
   const [storedVideos, setStoredVideos] = useState<StoredVideo[]>([]);
   const [onlineVideos, setOnlineVideos] = useState<VideoItem[]>([]);
   const [storageEstimate, setStorageEstimate] = useState<StorageEstimateSnapshot>({
-    quotaBytes: null,
-    usageBytes: null,
-    availableBytes: null,
-    remainingBytes: null,
+    quotaBytes: 0,
+    usageBytes: 0,
+    availableBytes: 0,
+    remainingBytes: 0,
     supported: false
   });
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(false);
@@ -125,15 +125,15 @@ function App() {
     try {
       const refreshedVideos = await getStoredVideos();
       setStoredVideos(refreshedVideos);
-      setStorageEstimate(await readStorageEstimate(getUsedBytes(refreshedVideos)));
+      setStorageEstimate(await readStorageEstimate());
     } catch {
       setMessage('Nao foi possivel abrir a cestinha local da Gatoteca.');
     }
   }
 
   async function refreshEstimateOnly(nextVideos?: StoredVideo[]) {
-    const sourceVideos = nextVideos ?? (await getStoredVideos());
-    setStorageEstimate(await readStorageEstimate(getUsedBytes(sourceVideos)));
+    void nextVideos;
+    setStorageEstimate(await readStorageEstimate());
   }
 
   async function loadOnlineLibrary(force = false): Promise<VideoItem[]> {
@@ -173,7 +173,7 @@ function App() {
 
     const firstVideo = videos[0];
     const refreshedVideos = await getStoredVideos();
-    const refreshedEstimate = await readStorageEstimate(getUsedBytes(refreshedVideos));
+    const refreshedEstimate = await readStorageEstimate();
     setStoredVideos(refreshedVideos);
     setStorageEstimate(refreshedEstimate);
 
@@ -265,7 +265,7 @@ function App() {
           processed += 1;
           const refreshed = await getStoredVideos();
           const refreshedUsedBytes = getUsedBytes(refreshed);
-          const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+          const refreshedEstimate = await readStorageEstimate();
           setStoredVideos(refreshed);
           setStorageEstimate(refreshedEstimate);
           setQueue((current) => ({
@@ -281,12 +281,13 @@ function App() {
 
     const refreshed = await getStoredVideos();
     const refreshedUsedBytes = getUsedBytes(refreshed);
-    const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+    const refreshedEstimate = await readStorageEstimate();
     const report: DownloadReport = {
       succeeded,
       failed: [...failures],
       cancelled: cancelRequested.current,
       usedBytes: refreshedUsedBytes,
+      initialEstimatedBytes: storageEstimate.remainingBytes,
       stopReason: cancelRequested.current ? 'cancelled' : 'finished'
     };
 
@@ -318,6 +319,7 @@ function App() {
     const failures: DownloadFailure[] = [];
     let copiesCreated = 0;
     let stopReason: DownloadReport['stopReason'] = 'finished';
+    const initialEstimatedBytes = plan.estimatedRemainingBytes;
 
     setQueue({
       isRunning: true,
@@ -364,19 +366,10 @@ function App() {
     while (!cancelRequested.current && downloadBlobOnce) {
       const refreshedVideos = await getStoredVideos();
       const refreshedUsedBytes = getUsedBytes(refreshedVideos);
-      const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+      const refreshedEstimate = await readStorageEstimate();
       const blobSize = downloadBlobOnce.size || baseVideo.sizeBytes;
       const nextCopyNumber = copiesCreated + 1;
       const nextId = `${baseVideo.id}-copy-${String(nextCopyNumber).padStart(6, '0')}`;
-
-      if (
-        refreshedEstimate.remainingBytes !== null &&
-        refreshedEstimate.remainingBytes > 0 &&
-        blobSize > refreshedEstimate.remainingBytes
-      ) {
-        stopReason = 'estimated_limit';
-        break;
-      }
 
       try {
         await saveStoredVideo({
@@ -391,7 +384,7 @@ function App() {
         copiesCreated += 1;
         const afterSaveVideos = await getStoredVideos();
         const afterSaveUsedBytes = getUsedBytes(afterSaveVideos);
-        const afterSaveEstimate = await readStorageEstimate(afterSaveUsedBytes);
+        const afterSaveEstimate = await readStorageEstimate();
         setStoredVideos(afterSaveVideos);
         setStorageEstimate(afterSaveEstimate);
         setQueue((current) => ({
@@ -421,7 +414,7 @@ function App() {
 
     const refreshed = await getStoredVideos();
     const refreshedUsedBytes = getUsedBytes(refreshed);
-    const refreshedEstimate = await readStorageEstimate(refreshedUsedBytes);
+    const refreshedEstimate = await readStorageEstimate();
     setStoredVideos(refreshed);
     setStorageEstimate(refreshedEstimate);
     setQueue({
@@ -440,6 +433,7 @@ function App() {
         cancelled: stopReason === 'cancelled',
         usedBytes: refreshedUsedBytes,
         copiesCreated,
+        initialEstimatedBytes,
         stopReason
       }
     });
@@ -647,7 +641,7 @@ function DashboardScreen(props: {
         <MetricCard title="Gatinhos Adotados" value={String(props.count)} icon="cat" accent="rose" />
         <MetricCard title="Espaco Ocupado" value={formatBytes(props.usedBytes)} icon="paw" accent="peach" />
         <MetricCard
-          title="Espaco para Novos Ronrons"
+          title="Espaco disponivel para a Gatoteca"
           value={props.estimate.availableBytes !== null ? formatBytes(props.estimate.availableBytes) : 'Nao informado'}
           icon="sparkle"
           accent="gold"
@@ -673,6 +667,7 @@ function DashboardScreen(props: {
           <strong>{props.estimate.remainingBytes !== null ? formatBytes(props.estimate.remainingBytes) : 'Nao informado'}</strong>
         </p>
         <p className="helper-copy">A Gatoteca usa apenas armazenamento local da PWA e cuida so dos videos que ela mesma guarda.</p>
+        <p className="helper-copy">Estimado pelo navegador.</p>
       </div>
 
       <div className="action-grid">
@@ -827,6 +822,7 @@ function DownloadQueueScreen(props: { queue: QueueState; onCancel: () => void })
             <p>
               Espaco restante estimado: {props.queue.estimatedRemainingBytes !== null ? formatBytes(props.queue.estimatedRemainingBytes) : 'Nao informado'}
             </p>
+            <p>Estimado pelo navegador.</p>
           </div>
           <button type="button" className="danger fluffy-button" onClick={props.onCancel}>
             <CatIcon name="basket" />
@@ -866,6 +862,13 @@ function Report(props: { report: DownloadReport }) {
         <MetricCard title="Falhas" value={String(props.report.failed.length)} icon="help" accent="peach" />
         <MetricCard title="Uso atual" value={formatBytes(props.report.usedBytes)} icon="paw" accent="gold" />
       </div>
+      <p>
+        Espaco estimado inicialmente:{' '}
+        <strong>{props.report.initialEstimatedBytes !== null && props.report.initialEstimatedBytes !== undefined ? formatBytes(props.report.initialEstimatedBytes) : 'Nao informado'}</strong>
+      </p>
+      <p>
+        Espaco realmente usado: <strong>{formatBytes(props.report.usedBytes)}</strong>
+      </p>
       <p>Motivo da parada: {describeStopReason(props.report.stopReason)}</p>
       {props.report.failed.length > 0 && (
         <div className="failure-list">
@@ -883,8 +886,6 @@ function Report(props: { report: DownloadReport }) {
 
 function describeStopReason(reason: DownloadReport['stopReason']) {
   switch (reason) {
-    case 'estimated_limit':
-      return 'espaco estimado atingido';
     case 'quota':
       return 'navegador recusou mais armazenamento';
     case 'cancelled':
@@ -955,7 +956,8 @@ function HelpScreen(props: { version: string; onShowInstall: () => void }) {
         <p>A biblioteca e carregada automaticamente.</p>
         <p>A Gatoteca usa apenas armazenamento local da PWA.</p>
         <p>Nenhum arquivo do celular e acessado.</p>
-        <p>O espaco exibido e uma estimativa fornecida pelo navegador.</p>
+        <p>Estimado pelo navegador.</p>
+        <p>A Gatoteca nao consegue ver todo o armazenamento do celular; ela usa a cota permitida pelo navegador.</p>
       </div>
 
       <div className="panel stack">
@@ -982,7 +984,7 @@ function CopyConfirmationModal(props: { plan: CopyPlan; onCancel: () => void; on
         <p>Deseja adotar todos os gatinhos que couberem na sua cestinha?</p>
         <dl>
           <div>
-            <dt>Espaco estimado disponivel</dt>
+            <dt>Espaco disponivel para a Gatoteca</dt>
             <dd>{props.plan.estimatedAvailableBytes !== null ? formatBytes(props.plan.estimatedAvailableBytes) : 'Nao informado'}</dd>
           </div>
           <div>
@@ -1002,6 +1004,7 @@ function CopyConfirmationModal(props: { plan: CopyPlan; onCancel: () => void; on
             <dd>{props.plan.estimatedCopies !== null ? String(props.plan.estimatedCopies) : 'Ate o navegador permitir'}</dd>
           </div>
         </dl>
+        <p>Estimado pelo navegador.</p>
         <div className="row-actions">
           <button type="button" onClick={props.onCancel}>
             Cancelar

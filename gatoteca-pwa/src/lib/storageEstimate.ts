@@ -1,4 +1,4 @@
-export const STORAGE_SAFETY_MARGIN_BYTES = 500 * 1024 * 1024;
+export const STORAGE_SAFETY_MARGIN_BYTES = 100 * 1024 * 1024;
 
 export type StorageEstimateSnapshot = {
   quotaBytes: null | number;
@@ -8,9 +8,7 @@ export type StorageEstimateSnapshot = {
   supported: boolean;
 };
 
-export async function readStorageEstimate(gatotecaUsageBytes: number): Promise<StorageEstimateSnapshot> {
-  void gatotecaUsageBytes;
-
+export async function readStorageEstimate(): Promise<StorageEstimateSnapshot> {
   if (!navigator.storage || typeof navigator.storage.estimate !== 'function') {
     return {
       quotaBytes: null,
@@ -23,19 +21,8 @@ export async function readStorageEstimate(gatotecaUsageBytes: number): Promise<S
 
   try {
     const estimate = await navigator.storage.estimate();
-    const quotaBytes = typeof estimate.quota === 'number' ? estimate.quota : null;
-    const usageBytes = typeof estimate.usage === 'number' ? estimate.usage : null;
-
-    if (quotaBytes === null || usageBytes === null) {
-      return {
-        quotaBytes,
-        usageBytes,
-        availableBytes: null,
-        remainingBytes: null,
-        supported: true
-      };
-    }
-
+    const quotaBytes = estimate.quota || 0;
+    const usageBytes = estimate.usage || 0;
     const availableBytes = Math.max(quotaBytes - usageBytes, 0);
     const remainingBytes = Math.max(availableBytes - STORAGE_SAFETY_MARGIN_BYTES, 0);
 
